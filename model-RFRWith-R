@@ -1,0 +1,193 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_squared_error
+
+# Load and preprocess data
+df = pd.read_excel('data.xlsx')
+df.columns = df.columns.str.strip()
+df['Age'] = df['Age'].astype(str).str.extract('(\d+)').astype(float)
+df['Cure'] = df['Cure'].replace('Air', 'Site')
+
+input_cols = ['Element type', 'Cure', 'Age', 'Rebound', 'UPV (km/s)']
+output_col = 'Strength (MPa)'
+categorical_cols = ['Element type', 'Cure']
+
+X = df[input_cols]
+y = df[output_col]
+
+model_random_state = 42
+iterations = 200
+
+# Store results for each iteration and model
+results = {
+    'iteration': [],
+    'model': [],
+    'r2': [],
+    'rmse': [],
+    'sd': [],
+    'points_outside_10pct': [],
+    'total_points': [],
+    'percent_outside_10pct': []
+}
+
+# Function to create prediction vs actual plot with 10% error margin
+def plot_prediction_vs_actual(y_true, y_pred, model_name, iteration):
+    plt.figure(figsize=(10, 8))
+
+    # Plot actual vs predicted
+    plt.scatter(y_true, y_pred, alpha=0.7)
+
+    # Create diagonal line (perfect prediction)
+    min_val = min(min(y_true), min(y_pred))
+    max_val = max(max(y_true), max(y_pred))
+    diagonal = np.linspace(min_val, max_val, 100)
+    plt.plot(diagonal, diagonal, 'r-', label='Perfect prediction')
+
+    # Create +10% and -10% lines
+    plt.plot(diagonal, diagonal * 1.1, 'g--', label='+10%')
+    plt.plot(diagonal, diagonal * 0.9, 'g--', label='-10%')
+
+    # Identify and highlight points outside 10% error margin
+    percent_error = np.abs((y_true - y_pred) / y_true) * 100
+    outside_points = percent_error > 10
+    points_outside = sum(outside_points)
+
+    if points_outside > 0:
+        plt.scatter(y_true[outside_points], y_pred[outside_points],
+                   color='red', edgecolors='black', s=100, alpha=0.7,
+                   label=f'Outside 10% margin: {points_outside}/{len(y_true)} points')
+
+    # Add labels and title
+    plt.xlabel('Actual Strength (MPa)')
+    plt.ylabel('Predicted Strength (MPa)')
+    plt.title(f'{model_name} - Iteration {iteration+1}: Actual vs Predicted\n'
+              f'Points outside 10% margin: {points_outside}/{len(y_true)} ({points_outside/len(y_true)*100:.1f}%)')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+
+    # Return plot for saving
+    return plt.gcf(), points_outside, len(y_true)
+
+# Run models for each iteration
+for i in range(iterations):
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=i)
+
+    # Random Forest model
+    model_rf = Pipeline([
+        ('preprocessor', ColumnTransformer(
+            [('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols)],
+            remainder='passthrough')),
+        ('regressor', RandomForestRegressor(random_state=model_random_state))
+    ])
+    model_rf.fit(X_train, y_train)
+    y_pred_rf = model_rf.predict(X_test)
+
+    # Extract numeric features for linear models
+    X_train_numeric = X_train[['Rebound', 'UPV (km/s)']]
+    X_test_numeric = X_test[['Rebound', 'UPV (km/s)']]
+
+    # Linear Regression: Rebound only
+    model_rebound = LinearRegression().fit(X_train_numeric[['Rebound']], y_train)
+    pred_rebound = model_rebound.predict(X_test_numeric[['Rebound']])
+
+    # Linear Regression: UPV only
+    model_upv = LinearRegression().fit(X_train_numeric[['UPV (km/s)']], y_train)
+    pred_upv = model_upv.predict(X_test_numeric[['UPV (km/s)']])
+
+    # Linear Regression: Both Rebound and UPV
+    model_both = LinearRegression().fit(X_train_numeric, y_train)
+    pred_both = model_both.predict(X_test_numeric)
+
+    # Generate plots and collect results for each model only at specific iterations
+    # For demonstration, we'll save plots for 1st, 100th and 200th iterations
+    if i == 0 or i == 99 or i == 199:
+        for model_name, preds in zip(
+            ['Rebound Only', 'UPV Only', 'Rebound + UPV', 'Random Forest'],
+            [pred_rebound, pred_upv, pred_both, y_pred_rf]):
+
+            # Generate and save plot
+            fig, points_outside, total_points = plot_prediction_vs_actual(y_test, preds, model_name, i)
+            fig.savefig(f"{model_name.replace(' ', '_').lower()}_iter_{i+1}.png", dpi=300, bbox_inches='tight')
+            plt.close(fig)
+
+    # Collect metrics for all iterations and all models
+    for model_name, preds in zip(
+        ['Rebound Only', 'UPV Only', 'Rebound + UPV', 'Random Forest'],
+        [pred_rebound, pred_upv, pred_both, y_pred_rf]):
+
+        # Calculate metrics
+        r2 = r2_score(y_test, preds)
+        rmse = np.sqrt(mean_squared_error(y_test, preds))
+        sd = np.std(y_test - preds)
+
+        # Calculate points outside 10% error margin
+        percent_error = np.abs((y_test - preds) / y_test) * 100
+        points_outside = sum(percent_error > 10)
+        total_points = len(y_test)
+
+        # Store results
+        results['iteration'].append(i+1)
+        results['model'].append(model_name)
+        results['r2'].append(r2)
+        results['rmse'].append(rmse)
+        results['sd'].append(sd)
+        results['points_outside_10pct'].append(points_outside)
+        results['total_points'].append(total_points)
+        results['percent_outside_10pct'].append(points_outside/total_points*100)
+
+# Convert results to DataFrame for analysis
+results_df = pd.DataFrame(results)
+
+# Calculate summary statistics for each model
+summary = results_df.groupby('model').agg({
+    'r2': ['mean', 'std', 'min', 'max'],
+    'rmse': ['mean', 'std', 'min', 'max'],
+    'sd': ['mean', 'std', 'min', 'max'],
+    'percent_outside_10pct': ['mean', 'std', 'min', 'max']
+})
+
+# Print detailed summary
+print("Model Performance Summary over", iterations, "iterations:")
+print(summary)
+
+# Create a more concise table focusing on points outside 10% error margin
+outside_summary = results_df.groupby('model').agg({
+    'r2': 'mean',
+    'rmse': 'mean',
+    'percent_outside_10pct': ['mean', 'std', 'min', 'max']
+}).round(2)
+
+print("\nSummary of Points Outside 10% Error Margin:")
+print(outside_summary)
+
+# Create a box plot for visualization of percentage of points outside 10% error margin
+plt.figure(figsize=(12, 6))
+results_df.boxplot(column='percent_outside_10pct', by='model', grid=False)
+plt.title('Distribution of Points Outside 10% Error Margin by Model')
+plt.ylabel('Percentage of Test Points (%)')
+plt.xlabel('Model')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.savefig('outside_points_boxplot.png', dpi=300, bbox_inches='tight')
+
+# Create a table with the iteration-by-iteration results
+iteration_table = results_df.pivot_table(
+    index='iteration',
+    columns='model',
+    values='percent_outside_10pct'
+).reset_index()
+
+# Save results to Excel for detailed analysis
+results_df.to_excel('model_results_all_iterations.xlsx', index=False)
+iteration_table.to_excel('percent_outside_10pct_by_iteration.xlsx', index=False)
+
+print("\nFull results saved to 'model_results_all_iterations.xlsx'")
+print("Percentage of points outside 10% by iteration saved to 'percent_outside_10pct_by_iteration.xlsx'")
